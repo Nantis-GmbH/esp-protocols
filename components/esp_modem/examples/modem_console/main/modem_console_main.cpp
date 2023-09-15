@@ -28,6 +28,7 @@
 #include "esp_log.h"
 #include "console_helper.hpp"
 #include "my_module_dce.hpp"
+#include "esp_netif_ppp.h"
 
 #if defined(CONFIG_EXAMPLE_FLOW_CONTROL_NONE)
 #define EXAMPLE_FLOW_CONTROL ESP_MODEM_FLOW_CONTROL_NONE
@@ -52,7 +53,7 @@
  */
 #define DEFAULT_APN CONFIG_EXAMPLE_MODEM_PPP_APN
 
-#define GPIO_OUTPUT_PWRKEY    (gpio_num_t)CONFIG_EXAMPLE_MODEM_PWRKEY_PIN
+#define GPIO_OUTPUT_PWRKEY (gpio_num_t)32
 #define GPIO_OUTPUT_PIN_SEL  (1ULL<<GPIO_OUTPUT_PWRKEY)
 
 extern "C" void modem_console_register_http(void);
@@ -82,11 +83,9 @@ void wakeup_modem(void)
 {
     /* Power on the modem */
     ESP_LOGI(TAG, "Power on the modem");
-    gpio_set_level(GPIO_OUTPUT_PWRKEY, 1);
-    vTaskDelay(pdMS_TO_TICKS(1000));
     gpio_set_level(GPIO_OUTPUT_PWRKEY, 0);
-
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(300));
+    gpio_set_level(GPIO_OUTPUT_PWRKEY, 1);
 }
 
 #ifdef CONFIG_EXAMPLE_MODEM_DEVICE_SHINY
@@ -97,16 +96,69 @@ command_result handle_urc(uint8_t *data, size_t len)
 }
 #endif
 
+static void on_ppp_changed(void *arg, esp_event_base_t event_base,
+                           int32_t event_id, void *event_data)
+{
+    ESP_LOGI(TAG, "PPP state changed event %d", event_id);
+    if (event_id == NETIF_PPP_ERRORUSER)
+    {
+        /* User interrupted event from esp-netif */
+        esp_netif_t *netif = (esp_netif_t *)event_data;
+        ESP_LOGI(TAG, "User interrupted event from netif:%p", netif);
+    }
+}
+
+static void on_ip_event(void *arg, esp_event_base_t event_base,
+                        int32_t event_id, void *event_data)
+{
+    ESP_LOGD(TAG, "IP event! %d", event_id);
+    if (event_id == IP_EVENT_PPP_GOT_IP)
+    {
+        esp_netif_dns_info_t dns_info;
+
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        esp_netif_t *netif = event->esp_netif;
+
+        ESP_LOGI(TAG, "Modem Connect to PPP Server");
+        ESP_LOGI(TAG, "~~~~~~~~~~~~~~");
+        ESP_LOGI(TAG, "IP          : " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Netmask     : " IPSTR, IP2STR(&event->ip_info.netmask));
+        ESP_LOGI(TAG, "Gateway     : " IPSTR, IP2STR(&event->ip_info.gw));
+        esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
+        ESP_LOGI(TAG, "Name Server1: " IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+        esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns_info);
+        ESP_LOGI(TAG, "Name Server2: " IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+        ESP_LOGI(TAG, "~~~~~~~~~~~~~~");
+        // xEventGroupSetBits(event_group, CONNECT_BIT);
+
+        ESP_LOGI(TAG, "GOT ip event!!!");
+    }
+    else if (event_id == IP_EVENT_PPP_LOST_IP)
+    {
+        ESP_LOGI(TAG, "Modem Disconnect from PPP Server");
+    }
+    else if (event_id == IP_EVENT_GOT_IP6)
+    {
+        ESP_LOGI(TAG, "GOT IPv6 event!");
+
+        ip_event_got_ip6_t *event = (ip_event_got_ip6_t *)event_data;
+        ESP_LOGI(TAG, "Got IPv6 address " IPV6STR, IPV62STR(event->ip6_info.ip));
+    }
+}
+
 extern "C" void app_main(void)
 {
-    static RTC_RODATA_ATTR char apn_rtc[20] = DEFAULT_APN;
+    static RTC_RODATA_ATTR char apn_rtc[30] = DEFAULT_APN;
     static RTC_DATA_ATTR modem_mode mode_rtc = esp_modem::modem_mode::COMMAND_MODE;
 
     config_gpio();
+    wakeup_modem();
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &on_ip_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, &on_ppp_changed, NULL));
 
     // init the netif, DTE and DCE respectively
     esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(DEFAULT_APN);
@@ -117,11 +169,12 @@ extern "C" void app_main(void)
 #if defined(CONFIG_EXAMPLE_SERIAL_CONFIG_UART)
     esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
     /* setup UART specific configuration based on kconfig options */
-    dte_config.uart_config.tx_io_num = CONFIG_EXAMPLE_MODEM_UART_TX_PIN;
-    dte_config.uart_config.rx_io_num = CONFIG_EXAMPLE_MODEM_UART_RX_PIN;
-    dte_config.uart_config.rts_io_num = CONFIG_EXAMPLE_MODEM_UART_RTS_PIN;
-    dte_config.uart_config.cts_io_num = CONFIG_EXAMPLE_MODEM_UART_CTS_PIN;
-    dte_config.uart_config.flow_control = EXAMPLE_FLOW_CONTROL;
+    dte_config.uart_config.tx_io_num = 25;
+    dte_config.uart_config.rx_io_num = 26;
+    dte_config.uart_config.rts_io_num = 14;
+    dte_config.uart_config.cts_io_num = 27;
+    dte_config.uart_config.flow_control = ESP_MODEM_FLOW_CONTROL_HW;
+    dte_config.uart_config.baud_rate = 115200;
     dte_config.uart_config.rx_buffer_size = CONFIG_EXAMPLE_MODEM_UART_RX_BUFFER_SIZE;
     dte_config.uart_config.tx_buffer_size = CONFIG_EXAMPLE_MODEM_UART_TX_BUFFER_SIZE;
     dte_config.uart_config.event_queue_size = CONFIG_EXAMPLE_MODEM_UART_EVENT_QUEUE_SIZE;
@@ -191,6 +244,12 @@ extern "C" void app_main(void)
 #endif
 
     assert(dce != nullptr);
+
+    if (!dce->set_mode(esp_modem::modem_mode::COMMAND_MODE))
+    {
+        ESP_LOGE(TAG, "set command mode failed");
+        return;
+    }
 
     if (dte_config.uart_config.flow_control == ESP_MODEM_FLOW_CONTROL_HW) {
         if (command_result::OK != dce->set_flow_control(2, 2)) {
