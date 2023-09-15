@@ -20,8 +20,22 @@ esp_err_t modem_init_network(esp_netif_t *netif)
 {
     // setup the DCE
     esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
+    /* setup UART specific configuration based on kconfig options */
+    dte_config.uart_config.tx_io_num = 25;
+    dte_config.uart_config.rx_io_num = 26;
+    // dte_config.uart_config.rts_io_num = 33;
+    // dte_config.uart_config.cts_io_num = 27;
+    // dte_config.uart_config.flow_control = ESP_MODEM_FLOW_CONTROL_HW;
+    dte_config.uart_config.flow_control = ESP_MODEM_FLOW_CONTROL_NONE;
+    dte_config.uart_config.rx_buffer_size = 4096;
+    dte_config.uart_config.tx_buffer_size = 4096;
+    dte_config.uart_config.event_queue_size = 30;
+    dte_config.uart_config.baud_rate = 115200;
+    dte_config.task_stack_size = 8192;
+    dte_config.task_priority = 5;
+    dte_config.dte_buffer_size = 4096 / 2;
     esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(CONFIG_EXAMPLE_MODEM_PPP_APN);
-    dce = esp_modem_new(&dte_config, &dce_config, netif);
+    dce = esp_modem_new_dev(ESP_MODEM_DCE_BG96, &dte_config, &dce_config, netif);
     if (!dce) {
         return ESP_FAIL;
     }
@@ -75,4 +89,14 @@ bool modem_check_signal()
         return rssi != 99 && rssi > 5;
     }
     return false;
+}
+
+bool modem_set_baud(int baud)
+{
+    return esp_modem_set_baud(dce, baud) == ESP_OK;
+}
+
+bool modem_set_flow_control()
+{
+    return esp_modem_set_flow_control(dce, 2, 2) == ESP_OK;
 }

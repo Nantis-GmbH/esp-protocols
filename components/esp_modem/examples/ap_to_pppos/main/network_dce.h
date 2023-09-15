@@ -45,6 +45,10 @@ void modem_reset();
 
 bool modem_check_signal();
 
+bool modem_set_baud(int baud);
+
+bool modem_set_flow_control();
+
 #ifdef __cplusplus
 }
 #endif

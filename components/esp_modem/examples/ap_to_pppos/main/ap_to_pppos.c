@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "network_dce.h"
+#include "driver/uart.h"
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
@@ -141,7 +142,53 @@ void start_network(void)
             }
             continue;
         }
-        if (!modem_check_signal()) {
+#if 0
+        if (!modem_set_baud(460800))
+        {
+            ESP_LOGI(TAG, "Could not set modem baud ...will retry after 1s");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (uart_set_baudrate(UART_NUM_1, 460800) != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Could not set ESP baud ...will retry after 1s");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+#endif
+#if 1
+        if (!modem_set_flow_control())
+        {
+            ESP_LOGI(TAG, "Could not set modem flow control ...will retry after 1s");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+#if 1
+#if 0
+        if (uart_set_pin(UART_NUM_1, 25, 26, 27, 23) != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Could not set ESP UART pins ...will retry after 1s");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+#endif
+#if 0
+        if (uart_set_hw_flow_ctrl(UART_NUM_1, UART_HW_FLOWCTRL_CTS_RTS, UART_FIFO_LEN - 8) != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Could not set ESP flow control ...will retry after 1s");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+#endif
+#endif
+#endif
+
+        if (!modem_check_signal())
+        {
             ESP_LOGI(TAG, "Poor signal ...will check after 5s");
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
