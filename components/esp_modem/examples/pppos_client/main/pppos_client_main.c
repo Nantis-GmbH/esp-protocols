@@ -20,7 +20,8 @@
 #include "esp_modem_api.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
-
+#include "driver/gpio.h"
+#include "esp_http_client.h"
 
 #if defined(CONFIG_EXAMPLE_FLOW_CONTROL_NONE)
 #define EXAMPLE_FLOW_CONTROL ESP_MODEM_FLOW_CONTROL_NONE
@@ -144,6 +145,90 @@ static void on_ip_event(void *arg, esp_event_base_t event_base,
     }
 }
 
+#define GPIO_OUTPUT_PWRKEY (gpio_num_t)32
+#define GPIO_OUTPUT_PIN_SEL (1ULL << GPIO_OUTPUT_PWRKEY)
+
+void config_gpio(void)
+{
+    gpio_config_t io_conf = {}; // zero-initialize the config structure.
+
+    io_conf.intr_type = GPIO_INTR_DISABLE;        // disable interrupt
+    io_conf.mode = GPIO_MODE_OUTPUT;              // set as output mode
+    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;   // bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE; // disable pull-down mode
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;     // disable pull-up mode
+
+    gpio_set_level(GPIO_OUTPUT_PWRKEY, 1);
+    gpio_config(&io_conf); // configure GPIO with the given settings
+}
+
+void wakeup_modem(void)
+{
+    /* Power on the modem */
+    ESP_LOGI(TAG, "Power on the modem");
+    gpio_set_level(GPIO_OUTPUT_PWRKEY, 0);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    gpio_set_level(GPIO_OUTPUT_PWRKEY, 1);
+}
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id)
+    {
+    case HTTP_EVENT_ERROR:
+        ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+        break;
+    case HTTP_EVENT_ON_CONNECTED:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+        break;
+    case HTTP_EVENT_HEADER_SENT:
+        ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+        break;
+    case HTTP_EVENT_ON_HEADER:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+        break;
+    case HTTP_EVENT_ON_DATA:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+        if ((bool)evt->user_data &&
+            !esp_http_client_is_chunked_response(evt->client))
+        {
+            ESP_LOG_BUFFER_HEXDUMP(TAG, evt->data, evt->data_len, ESP_LOG_INFO);
+        }
+
+        break;
+    case HTTP_EVENT_ON_FINISH:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+        break;
+    case HTTP_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+        break;
+    default:
+        break;
+    }
+    return ESP_OK;
+}
+
+static int do_http_client()
+{
+    esp_http_client_config_t config = {
+        .event_handler = http_event_handler,
+    };
+
+    config.url = "http://httpbin.org/get";
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK)
+    {
+        uint64_t content_length = esp_http_client_get_content_length(client);
+        ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %lld",
+                 esp_http_client_get_status_code(client), content_length);
+        return 0;
+    }
+    ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
+    return 1;
+}
 
 void app_main(void)
 {
@@ -161,15 +246,19 @@ void app_main(void)
 
     event_group = xEventGroupCreate();
 
+    config_gpio();
+    wakeup_modem();
+
     /* Configure the DTE */
 #if defined(CONFIG_EXAMPLE_SERIAL_CONFIG_UART)
     esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
     /* setup UART specific configuration based on kconfig options */
-    dte_config.uart_config.tx_io_num = CONFIG_EXAMPLE_MODEM_UART_TX_PIN;
-    dte_config.uart_config.rx_io_num = CONFIG_EXAMPLE_MODEM_UART_RX_PIN;
-    dte_config.uart_config.rts_io_num = CONFIG_EXAMPLE_MODEM_UART_RTS_PIN;
-    dte_config.uart_config.cts_io_num = CONFIG_EXAMPLE_MODEM_UART_CTS_PIN;
-    dte_config.uart_config.flow_control = EXAMPLE_FLOW_CONTROL;
+    dte_config.uart_config.tx_io_num = 25;
+    dte_config.uart_config.rx_io_num = 26;
+    dte_config.uart_config.rts_io_num = 14;
+    dte_config.uart_config.cts_io_num = 27;
+    dte_config.uart_config.flow_control = ESP_MODEM_FLOW_CONTROL_HW;
+    dte_config.uart_config.baud_rate = 115200;
     dte_config.uart_config.rx_buffer_size = CONFIG_EXAMPLE_MODEM_UART_RX_BUFFER_SIZE;
     dte_config.uart_config.tx_buffer_size = CONFIG_EXAMPLE_MODEM_UART_TX_BUFFER_SIZE;
     dte_config.uart_config.event_queue_size = CONFIG_EXAMPLE_MODEM_UART_EVENT_QUEUE_SIZE;
@@ -197,6 +286,14 @@ void app_main(void)
     esp_modem_dce_t *dce = esp_modem_new(&dte_config, &dce_config, esp_netif);
 #endif
     assert(dce);
+
+    esp_err_t err = esp_modem_set_mode(dce, ESP_MODEM_MODE_COMMAND);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "esp_modem_set_mode(ESP_MODEM_MODE_COMMAND) failed with %d", err);
+        return;
+    }
+
     if (dte_config.uart_config.flow_control == ESP_MODEM_FLOW_CONTROL_HW) {
         esp_err_t err = esp_modem_set_flow_control(dce, 2, 2);  //2/2 means HW Flow Control.
         if (err != ESP_OK) {
@@ -251,7 +348,7 @@ void app_main(void)
 #endif
 
     int rssi, ber;
-    esp_err_t err = esp_modem_get_signal_quality(dce, &rssi, &ber);
+    err = esp_modem_get_signal_quality(dce, &rssi, &ber);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_modem_get_signal_quality failed with %d %s", err, esp_err_to_name(err));
         return;
@@ -276,41 +373,24 @@ void app_main(void)
         ESP_LOGE(TAG, "esp_modem_set_mode(ESP_MODEM_MODE_DATA) failed with %d", err);
         return;
     }
+
+    esp_netif_ip_info_t ip_info;
+    esp_netif_get_ip_info(esp_netif, &ip_info);
+    if (ip_info.ip.addr)
+    {
+        ESP_LOGW(TAG, "ip: %d", ip_info.ip.addr);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "no ip");
+    }
+
     /* Wait for IP address */
     ESP_LOGI(TAG, "Waiting for IP address");
     xEventGroupWaitBits(event_group, CONNECT_BIT | USB_DISCONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     CHECK_USB_DISCONNECTION(event_group);
 
-    /* Config MQTT */
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    esp_mqtt_client_config_t mqtt_config = {
-        .broker.address.uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
-    };
-#else
-    esp_mqtt_client_config_t mqtt_config = {
-        .uri = CONFIG_EXAMPLE_MQTT_BROKER_URI,
-    };
-#endif
-    esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_config);
-    esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(mqtt_client);
-    ESP_LOGI(TAG, "Waiting for MQTT data");
-    xEventGroupWaitBits(event_group, GOT_DATA_BIT | USB_DISCONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    CHECK_USB_DISCONNECTION(event_group);
-
-    esp_mqtt_client_destroy(mqtt_client);
-    err = esp_modem_set_mode(dce, ESP_MODEM_MODE_COMMAND);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_modem_set_mode(ESP_MODEM_MODE_COMMAND) failed with %d", err);
-        return;
-    }
-    char imsi[32];
-    err = esp_modem_get_imsi(dce, imsi);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_modem_get_imsi failed with %d", err);
-        return;
-    }
-    ESP_LOGI(TAG, "IMSI=%s", imsi);
+    do_http_client();
 
 #if defined(CONFIG_EXAMPLE_SERIAL_CONFIG_USB)
     // USB example runs in a loop to demonstrate hot-plugging and sudden disconnection features.
