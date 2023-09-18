@@ -32,7 +32,7 @@
 
 static const char *TAG = "ap_to_pppos";
 
-static EventGroupHandle_t event_group = NULL;
+EventGroupHandle_t event_group = NULL;
 static const int CONNECT_BIT = BIT0;
 static const int DISCONNECT_BIT = BIT1;
 
@@ -130,17 +130,8 @@ void wifi_init_softap(void)
 void start_network(void)
 {
     EventBits_t bits = 0;
-    while ((bits & CONNECT_BIT) == 0) {
-        if (!modem_check_sync()) {
-            ESP_LOGE(TAG, "Modem does not respond, maybe in DATA mode? ...exiting network mode");
-            modem_stop_network();
-            if (!modem_check_sync()) {
-                ESP_LOGE(TAG, "Modem does not respond to AT ...restarting");
-                modem_reset();
-                ESP_LOGI(TAG, "Restarted");
-            }
-            continue;
-        }
+    while ((bits & CONNECT_BIT) == 0)
+    {
         if (!modem_check_signal()) {
             ESP_LOGI(TAG, "Poor signal ...will check after 5s");
             vTaskDelay(pdMS_TO_TICKS(5000));
